@@ -63,7 +63,7 @@ def preview_file(file):
         return None
 
 
-def extract_receipt(file, method="vision_llm") -> tuple[str, str, str, str]:
+async def extract_receipt(file, method="vision_llm") -> tuple[str, str, str, str]:
     """
     Upload a file to the FastAPI backend and return the results.
 
@@ -95,16 +95,35 @@ def extract_receipt(file, method="vision_llm") -> tuple[str, str, str, str]:
             with open(file, "rb") as f:
                 file_bytes = f.read()
 
-        # Upload to FastAPI backend
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(
-                f"{API_BASE}/upload",
-                params={"method": method},
-                files={"file": (filename.split("/")[-1].split("\\")[-1], file_bytes, mime_type)},
-            )
+        data = None
+        # On Render, bypass local network port bindings and invoke the pipeline directly in-process
+        if os.getenv("RENDER") == "true":
+            try:
+                from app.main import _process_single_file
+                from fastapi import UploadFile
+                
+                upload_file = UploadFile(
+                    file=io.BytesIO(file_bytes),
+                    filename=filename.split("/")[-1].split("\\")[-1],
+                    headers={"content-type": mime_type}
+                )
+                result = await _process_single_file(upload_file, method)
+                data = result.model_dump()
+                elapsed = time.time() - start
+                print("[Render] Direct in-process extraction succeeded.")
+            except Exception as e:
+                print(f"[Render] Direct extraction failed: {e}. Falling back to HTTP.")
 
-        elapsed = time.time() - start
-        data = response.json()
+        # Fallback (or local development execution path)
+        if data is None:
+            with httpx.Client(timeout=120.0) as client:
+                response = client.post(
+                    f"{API_BASE}/upload",
+                    params={"method": method},
+                    files={"file": (filename.split("/")[-1].split("\\")[-1], file_bytes, mime_type)},
+                )
+            elapsed = time.time() - start
+            data = response.json()
 
         if data.get("success"):
             receipt = data["data"]
@@ -876,6 +895,7 @@ with gr.Blocks(
     css=custom_css,
 ) as demo:
     demo.css = custom_css
+    gr.HTML(f"<style>{custom_css}</style>")
     with gr.Row(equal_height=True, elem_id="main-container"):
         # Left Column: Upload panel + Live Image/PDF Preview
         with gr.Column(scale=1, elem_id="left-panel"):
