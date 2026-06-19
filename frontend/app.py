@@ -990,8 +990,8 @@ with gr.Blocks(
 
                 gr.HTML(
                     '<div class="footer-row">'
-                    '<a class="footer-link" href="https://github.com" target="_blank">GitHub</a>'
-                    '<a class="footer-link" href="#" target="_blank">Docs</a>'
+                    '<a class="footer-link" href="https://github.com/Natraj16/Invoize" target="_blank">GitHub</a>'
+                    '<a class="footer-link" href="https://github.com/Natraj16/Invoize/blob/main/README.md" target="_blank">Docs</a>'
                     '</div>'
                 )
 
