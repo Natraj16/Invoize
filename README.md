@@ -159,7 +159,7 @@ To run the integration benchmark suite and update performance metrics:
 ```bash
 python -m app.benchmark
 ```
-This runs the dual-pipeline tests on files inside `tests/test_set/` and updates the `benchmark_results.md` report.
+This runs the dual-pipeline tests on files inside `tests/test_set/` and updates the `docs/benchmark_results.md` report.
 
 ---
 

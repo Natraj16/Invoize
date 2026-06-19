@@ -241,7 +241,7 @@ async def run_benchmark():
 
 def generate_report(results: List[Dict[str, Any]]):
     """Generate and write a markdown benchmark report."""
-    report_path = PROJECT_ROOT / "benchmark_results.md"
+    report_path = PROJECT_ROOT / "docs" / "benchmark_results.md"
     
     # Calculate averages
     total_vision_score = 0.0
