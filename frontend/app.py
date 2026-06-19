@@ -22,7 +22,7 @@ import gradio as gr
 import io
 from PIL import Image
 
-API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
+API_BASE = os.getenv("API_BASE", f"http://127.0.0.1:{os.getenv('PORT', '8000')}")
 
 
 def preview_file(file):
@@ -875,6 +875,7 @@ with gr.Blocks(
     title="Invoize",
     css=custom_css,
 ) as demo:
+    demo.css = custom_css
     with gr.Row(equal_height=True, elem_id="main-container"):
         # Left Column: Upload panel + Live Image/PDF Preview
         with gr.Column(scale=1, elem_id="left-panel"):
