@@ -31,7 +31,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app.schemas import ReceiptData
+from app.schemas import ReceiptData, get_currency_symbol
 
 
 # --- Validation Result Models ---
@@ -108,7 +108,7 @@ def _validate_math(data: ReceiptData) -> list[FieldFlag]:
     Three independent checks:
     1. Each line item: qty × unit_price ≈ total_price
     2. Sum of line items ≈ subtotal (if subtotal present)
-    3. Subtotal + tax (+ tip) ≈ total
+    3. Subtotal + tax (+ tip) (- discount) ≈ total
 
     Why tolerance-based instead of exact?
     - Tax is often calculated per-line then summed (rounding at each step)
@@ -116,6 +116,7 @@ def _validate_math(data: ReceiptData) -> list[FieldFlag]:
     - OCR/vision might misread a digit (e.g., 3 vs 8)
     """
     flags: list[FieldFlag] = []
+    sym = get_currency_symbol(data.currency)
 
     # Check 1: Line item arithmetic
     for i, item in enumerate(data.line_items):
@@ -128,9 +129,9 @@ def _validate_math(data: ReceiptData) -> list[FieldFlag]:
                 field_name=f"line_items[{i}].total_price",
                 severity="error",
                 message=(
-                    f"Line item '{item.name}': {item.quantity} x ${item.unit_price:.2f} "
-                    f"= ${expected:.2f}, but total_price is ${actual:.2f} "
-                    f"(difference: ${diff:.2f})"
+                    f"Line item '{item.name}': {item.quantity} x {sym}{item.unit_price:.2f} "
+                    f"= {sym}{expected:.2f}, but total_price is {sym}{actual:.2f} "
+                    f"(difference: {sym}{diff:.2f})"
                 ),
             ))
 
@@ -144,57 +145,105 @@ def _validate_math(data: ReceiptData) -> list[FieldFlag]:
                 field_name="subtotal",
                 severity="error",
                 message=(
-                    f"Sum of line items (${items_sum:.2f}) doesn't match "
-                    f"subtotal (${data.subtotal:.2f}), difference: ${diff:.2f}"
+                    f"Sum of line items ({sym}{items_sum:.2f}) doesn't match "
+                    f"subtotal ({sym}{data.subtotal:.2f}), difference: {sym}{diff:.2f}"
                 ),
             ))
 
-    # Check 3: Subtotal + tax + tip ≈ total
+    # Check 3: Subtotal + tax + tip - discount ≈ total
     if data.subtotal is not None:
-        expected_total = data.subtotal
+        discount_val = getattr(data, "discount", 0.0) or 0.0
+        # Case A: Subtotal is pre-discount (must subtract discount)
+        expected_total_with_discount = data.subtotal
         if data.tax is not None:
-            expected_total += data.tax
+            expected_total_with_discount += data.tax
         if data.tip is not None:
-            expected_total += data.tip
-        expected_total = round(expected_total, 2)
+            expected_total_with_discount += data.tip
+        expected_total_with_discount -= discount_val
+        expected_total_with_discount = round(expected_total_with_discount, 2)
 
-        diff = abs(expected_total - data.total)
+        # Case B: Subtotal is post-discount (or no discount, so do not subtract again)
+        expected_total_no_discount = data.subtotal
+        if data.tax is not None:
+            expected_total_no_discount += data.tax
+        if data.tip is not None:
+            expected_total_no_discount += data.tip
+        expected_total_no_discount = round(expected_total_no_discount, 2)
+
+        diff_with_discount = abs(expected_total_with_discount - data.total)
+        diff_no_discount = abs(expected_total_no_discount - data.total)
+
+        # Pick the scenario that minimizes the math difference
+        if diff_with_discount <= diff_no_discount:
+            expected_total = expected_total_with_discount
+            diff = diff_with_discount
+            has_discount_applied = True
+        else:
+            expected_total = expected_total_no_discount
+            diff = diff_no_discount
+            has_discount_applied = False
+
         if diff > MATH_TOLERANCE:
-            components = f"subtotal (${data.subtotal:.2f})"
+            components = f"subtotal ({sym}{data.subtotal:.2f})"
             if data.tax is not None:
-                components += f" + tax (${data.tax:.2f})"
+                components += f" + tax ({sym}{data.tax:.2f})"
             if data.tip is not None:
-                components += f" + tip (${data.tip:.2f})"
+                components += f" + tip ({sym}{data.tip:.2f})"
+            if discount_val > 0 and has_discount_applied:
+                components += f" - discount ({sym}{discount_val:.2f})"
 
             flags.append(FieldFlag(
                 field_name="total",
                 severity="error",
                 message=(
-                    f"{components} = ${expected_total:.2f}, "
-                    f"but total is ${data.total:.2f} "
-                    f"(difference: ${diff:.2f})"
+                    f"{components} = {sym}{expected_total:.2f}, "
+                    f"but total is {sym}{data.total:.2f} "
+                    f"(difference: {sym}{diff:.2f})"
                 ),
             ))
 
-    # Check 3b: If no subtotal, check line items + tax ≈ total
+    # Check 3b: If no subtotal, check line items + tax - discount ≈ total
     elif data.line_items and data.subtotal is None:
         items_sum = round(sum(item.total_price for item in data.line_items), 2)
-        expected_total = items_sum
-        if data.tax is not None:
-            expected_total += data.tax
-        if data.tip is not None:
-            expected_total += data.tip
-        expected_total = round(expected_total, 2)
+        discount_val = getattr(data, "discount", 0.0) or 0.0
 
-        diff = abs(expected_total - data.total)
+        expected_total_with_discount = items_sum
+        if data.tax is not None:
+            expected_total_with_discount += data.tax
+        if data.tip is not None:
+            expected_total_with_discount += data.tip
+        expected_total_with_discount -= discount_val
+        expected_total_with_discount = round(expected_total_with_discount, 2)
+
+        expected_total_no_discount = items_sum
+        if data.tax is not None:
+            expected_total_no_discount += data.tax
+        if data.tip is not None:
+            expected_total_no_discount += data.tip
+        expected_total_no_discount = round(expected_total_no_discount, 2)
+
+        diff_with_discount = abs(expected_total_with_discount - data.total)
+        diff_no_discount = abs(expected_total_no_discount - data.total)
+
+        if diff_with_discount <= diff_no_discount:
+            expected_total = expected_total_with_discount
+            diff = diff_with_discount
+            has_discount_applied = True
+        else:
+            expected_total = expected_total_no_discount
+            diff = diff_no_discount
+            has_discount_applied = False
+
         if diff > MATH_TOLERANCE:
+            components = f"Sum of line items ({sym}{items_sum:.2f}) + tax/tip"
+            if discount_val > 0 and has_discount_applied:
+                components += f" - discount ({sym}{discount_val:.2f})"
             flags.append(FieldFlag(
                 field_name="total",
                 severity="warning",
                 message=(
-                    f"Sum of line items (${items_sum:.2f}) + tax/tip "
-                    f"= ${expected_total:.2f}, but total is ${data.total:.2f} "
-                    f"(difference: ${diff:.2f}). Note: subtotal was missing."
+                    f"{components} = {sym}{expected_total:.2f}, but total is {sym}{data.total:.2f} "
+                    f"(difference: {sym}{diff:.2f}). Note: subtotal was missing."
                 ),
             ))
 
@@ -210,6 +259,7 @@ def _validate_fields(data: ReceiptData) -> list[FieldFlag]:
     (bulk order), but it's worth flagging for review.
     """
     flags: list[FieldFlag] = []
+    sym = get_currency_symbol(data.currency)
 
     # --- Date checks ---
     if data.date:
@@ -262,21 +312,21 @@ def _validate_fields(data: ReceiptData) -> list[FieldFlag]:
         flags.append(FieldFlag(
             field_name="total",
             severity="warning",
-            message=f"Total is negative (${data.total:.2f}). Is this a refund?",
+            message=f"Total is negative ({sym}{data.total:.2f}). Is this a refund?",
         ))
 
     if data.total == 0:
         flags.append(FieldFlag(
             field_name="total",
             severity="warning",
-            message="Total is $0.00 — possibly an error",
+            message=f"Total is {sym}0.00 — possibly an error",
         ))
 
     if data.total > MAX_PLAUSIBLE_TOTAL:
         flags.append(FieldFlag(
             field_name="total",
             severity="warning",
-            message=f"Total (${data.total:,.2f}) is unusually high. Please verify.",
+            message=f"Total ({sym}{data.total:,.2f}) is unusually high. Please verify.",
         ))
 
     # --- Line item checks ---
@@ -300,7 +350,7 @@ def _validate_fields(data: ReceiptData) -> list[FieldFlag]:
             flags.append(FieldFlag(
                 field_name=f"line_items[{i}].unit_price",
                 severity="info",
-                message=f"Item '{item.name}' has negative unit price ${item.unit_price:.2f} (discount?)",
+                message=f"Item '{item.name}' has negative unit price {sym}{item.unit_price:.2f} (discount?)",
             ))
 
     # --- Tax checks ---
@@ -312,7 +362,7 @@ def _validate_fields(data: ReceiptData) -> list[FieldFlag]:
                 severity="warning",
                 message=(
                     f"Effective tax rate is {tax_rate:.1%} "
-                    f"(${data.tax:.2f} on ${data.subtotal:.2f}). "
+                    f"({sym}{data.tax:.2f} on {sym}{data.subtotal:.2f}). "
                     f"This seems unusually high."
                 ),
             ))

@@ -24,7 +24,7 @@ from typing import Optional
 from app.storage import get_all_line_items, list_receipts
 
 
-def generate_csv(receipt_id: Optional[str] = None) -> str:
+def generate_csv(receipt_id: Optional[str] = None, receipt_ids: Optional[list[str]] = None) -> str:
     """
     Generate CSV content with all receipts and their line items.
 
@@ -41,12 +41,19 @@ def generate_csv(receipt_id: Optional[str] = None) -> str:
     writer.writerow([
         "Receipt ID", "Vendor", "Date", "Currency",
         "Item Name", "Quantity", "Unit Price", "Line Total",
-        "Subtotal", "Tax", "Tip", "Total",
+        "Subtotal", "Discount", "Tax", "Tip", "Total",
         "Confidence", "Needs Review",
     ])
 
     # Get receipts
-    if receipt_id:
+    if receipt_ids:
+        from app.storage import get_receipt
+        receipts = []
+        for r_id in receipt_ids:
+            r = get_receipt(r_id)
+            if r:
+                receipts.append(r)
+    elif receipt_id:
         from app.storage import get_receipt
         receipt = get_receipt(receipt_id)
         receipts = [receipt] if receipt else []
@@ -70,6 +77,7 @@ def generate_csv(receipt_id: Optional[str] = None) -> str:
                     item.get("unit_price", ""),
                     item.get("total_price", ""),
                     data.get("subtotal", ""),
+                    data.get("discount", 0.0),
                     data.get("tax", ""),
                     data.get("tip", ""),
                     data.get("total", ""),
@@ -85,6 +93,7 @@ def generate_csv(receipt_id: Optional[str] = None) -> str:
                 data.get("currency", ""),
                 "", "", "", "",
                 data.get("subtotal", ""),
+                data.get("discount", 0.0),
                 data.get("tax", ""),
                 data.get("tip", ""),
                 data.get("total", ""),
@@ -95,7 +104,7 @@ def generate_csv(receipt_id: Optional[str] = None) -> str:
     return output.getvalue()
 
 
-def generate_excel(receipt_id: Optional[str] = None) -> bytes:
+def generate_excel(receipt_id: Optional[str] = None, receipt_ids: Optional[list[str]] = None) -> bytes:
     """
     Generate an Excel workbook with two sheets.
 
@@ -121,7 +130,7 @@ def generate_excel(receipt_id: Optional[str] = None) -> bytes:
 
     headers1 = [
         "Receipt ID", "Vendor", "Date", "Currency",
-        "Subtotal", "Tax", "Tip", "Total",
+        "Subtotal", "Discount", "Tax", "Tip", "Total",
         "Payment Method", "Confidence", "Needs Review",
         "Uploaded At",
     ]
@@ -137,7 +146,14 @@ def generate_excel(receipt_id: Optional[str] = None) -> bytes:
         cell.alignment = Alignment(horizontal="center")
 
     # Get data
-    if receipt_id:
+    if receipt_ids:
+        from app.storage import get_receipt
+        receipts = []
+        for r_id in receipt_ids:
+            r = get_receipt(r_id)
+            if r:
+                receipts.append(r)
+    elif receipt_id:
         from app.storage import get_receipt
         receipt = get_receipt(receipt_id)
         receipts = [receipt] if receipt else []
@@ -153,13 +169,14 @@ def generate_excel(receipt_id: Optional[str] = None) -> bytes:
         ws1.cell(row=row_idx, column=3, value=data.get("date", ""))
         ws1.cell(row=row_idx, column=4, value=data.get("currency", ""))
         ws1.cell(row=row_idx, column=5, value=data.get("subtotal"))
-        ws1.cell(row=row_idx, column=6, value=data.get("tax"))
-        ws1.cell(row=row_idx, column=7, value=data.get("tip"))
-        ws1.cell(row=row_idx, column=8, value=data.get("total"))
-        ws1.cell(row=row_idx, column=9, value=data.get("payment_method", ""))
-        ws1.cell(row=row_idx, column=10, value=validation.get("overall_confidence", ""))
-        ws1.cell(row=row_idx, column=11, value="Yes" if validation.get("needs_manual_review") else "No")
-        ws1.cell(row=row_idx, column=12, value=receipt.get("uploaded_at", ""))
+        ws1.cell(row=row_idx, column=6, value=data.get("discount", 0.0))
+        ws1.cell(row=row_idx, column=7, value=data.get("tax"))
+        ws1.cell(row=row_idx, column=8, value=data.get("tip"))
+        ws1.cell(row=row_idx, column=9, value=data.get("total"))
+        ws1.cell(row=row_idx, column=10, value=data.get("payment_method", ""))
+        ws1.cell(row=row_idx, column=11, value=validation.get("overall_confidence", ""))
+        ws1.cell(row=row_idx, column=12, value="Yes" if validation.get("needs_manual_review") else "No")
+        ws1.cell(row=row_idx, column=13, value=receipt.get("uploaded_at", ""))
 
     # Auto-size columns (approximate)
     for col in ws1.columns:

@@ -46,7 +46,6 @@ def init_db():
     Called at app startup. Idempotent — safe to call multiple times.
 
     Two tables:
-    - receipts: one row per uploaded file, stores the full extraction + validation
     - line_items: denormalized from the JSON for SQL-queryable analytics
       (e.g., "total spending by item name", "average receipt total")
     """
@@ -62,6 +61,7 @@ def init_db():
             overall_confidence TEXT,
             needs_review INTEGER DEFAULT 0,
             total REAL,
+            discount REAL,
             vendor_name TEXT,
             receipt_date TEXT,
             currency TEXT DEFAULT 'USD',
@@ -84,6 +84,16 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_line_items_receipt
             ON line_items(receipt_id);
     """)
+    # Check if discount column exists in receipts table
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(receipts)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if columns and "discount" not in columns:
+        try:
+            conn.execute("ALTER TABLE receipts ADD COLUMN discount REAL")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            print(f"[WARNING] Could not alter receipts table: {e}")
     conn.commit()
     conn.close()
 
@@ -116,9 +126,9 @@ def save_receipt(
         INSERT INTO receipts (
             id, filename, uploaded_at, extraction_method,
             extracted_data, validation_result, overall_confidence,
-            needs_review, total, vendor_name, receipt_date,
+            needs_review, total, discount, vendor_name, receipt_date,
             currency, processing_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             receipt_id,
@@ -130,6 +140,7 @@ def save_receipt(
             validation_dict.get("overall_confidence") if validation_dict else None,
             1 if (validation_dict and validation_dict.get("needs_manual_review")) else 0,
             data.total if data else None,
+            getattr(data, "discount", 0.0) if data else None,
             data.vendor_name if data else None,
             data.date if data else None,
             data.currency if data else None,

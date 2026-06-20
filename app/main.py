@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.extraction.pdf_handler import pdf_to_images
-from app.extraction.vision_llm import extract_from_image
+from app.extraction.vision_llm import extract_from_image, extract_from_text
 from app.extraction.ocr import extract_via_ocr_pipeline
 from app.schemas import ExtractionResponse
 from app.validation import validate_receipt
@@ -120,8 +120,23 @@ async def _validate_upload(file: UploadFile) -> bytes:
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="File is empty.")
 
-    # 3. Integrity check — try to open the file
-    if file.content_type == "application/pdf":
+    # 3. Integrity check — try to open/parse the file
+    is_text = (
+        file.content_type in ("text/csv", "application/json", "text/plain")
+        or (file.filename and file.filename.lower().endswith((".csv", ".json")))
+    )
+    if is_text:
+        try:
+            text = contents.decode("utf-8")
+            if file.content_type == "application/json" or (file.filename and file.filename.lower().endswith(".json")):
+                import json
+                json.loads(text)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid text or JSON content: {str(e)}",
+            )
+    elif file.content_type == "application/pdf":
         try:
             # Quick check: can we open it as a PDF?
             import fitz
@@ -186,7 +201,18 @@ async def _process_single_file(
     save_path = _save_upload(contents, file.filename or "upload")
 
     # Extract
-    if file.content_type == "application/pdf":
+    is_text = (
+        file.content_type in ("text/csv", "application/json", "text/plain")
+        or (file.filename and file.filename.lower().endswith((".csv", ".json")))
+    )
+    if is_text:
+        text_content = contents.decode("utf-8")
+        result = await extract_from_text(
+            text_content=text_content,
+            mime_type=file.content_type or "text/csv",
+            filename=file.filename or "unknown",
+        )
+    elif file.content_type == "application/pdf":
         # Convert PDF pages to images
         page_images = pdf_to_images(contents)
         if not page_images:
@@ -234,7 +260,7 @@ async def _process_single_file(
     if result.success:
         try:
             receipt_id = storage.save_receipt(result)
-            # We could add receipt_id to the response here if needed
+            result.id = receipt_id
         except Exception as e:
             # Don't fail the whole request if storage fails
             print(f"[WARNING] Failed to save receipt: {e}")

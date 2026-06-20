@@ -48,6 +48,21 @@ Key instructions for tricky cases:
 
 Extract every visible field. Leave optional fields as null if not present on the receipt."""
 
+TEXT_EXTRACTION_PROMPT = """You are an expert receipt and invoice data parser.
+
+Extract ALL structured data from this receipt/invoice text (which may be formatted as CSV, JSON, or plain text). Be thorough and precise.
+
+Key instructions for tricky cases:
+- If line items don't have explicit quantities, assume quantity = 1
+- If you see multiple tax lines (e.g., "State Tax" + "City Tax"), SUM them into the single `tax` field
+- For dates: convert ANY format to YYYY-MM-DD (e.g., "06/15/24" → "2024-06-15", "15 Jun 2024" → "2024-06-15")
+- For currency: infer from symbols ($ → USD, € → EUR, £ → GBP, ₹ → INR, Rs → INR). Default to INR if Rupees or ₹ is used or if no other currency is specified.
+- If the receipt shows a discount, populate the `discount` field with the total discount amount (positive number). Also, if the discount is listed as a line item, include it as a line item with a NEGATIVE total_price.
+- The `total` field is the FINAL amount paid (after tax, after tips, after discounts)
+- If subtotal is not explicitly printed but you can calculate it from line items, leave subtotal as null
+
+Extract every visible field. Leave optional fields as null if not present on the receipt."""
+
 
 def _get_client() -> genai.Client:
     """
@@ -175,3 +190,77 @@ async def extract_from_image(
             error=f"{type(e).__name__}: {str(e)}",
             processing_time_seconds=round(elapsed, 2),
         )
+
+
+async def extract_from_text(
+    text_content: str,
+    mime_type: str = "text/csv",
+    filename: str = "unknown",
+) -> ExtractionResponse:
+    """
+    Extract structured receipt data from text (CSV, JSON, plain text) using Gemini text generation.
+    Bypasses the LLM for JSON matching ReceiptData schema directly.
+    """
+    start_time = time.time()
+
+    try:
+        # Check if it's already matching ReceiptData schema directly to save tokens/time
+        if "json" in (mime_type or "").lower() or filename.endswith(".json"):
+            try:
+                import json
+                parsed_dict = json.loads(text_content)
+                receipt_data = ReceiptData.model_validate(parsed_dict)
+                elapsed = time.time() - start_time
+                return ExtractionResponse(
+                    success=True,
+                    filename=filename,
+                    extraction_method="direct_json",
+                    data=receipt_data,
+                    processing_time_seconds=round(elapsed, 2),
+                )
+            except Exception:
+                # Fallback to LLM if the JSON layout is in an arbitrary schema
+                pass
+
+        client = _get_client()
+
+        # Call Gemini with structured output
+        response = client.models.generate_content(
+            model=settings.GEMINI_MODEL,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=TEXT_EXTRACTION_PROMPT),
+                        types.Part.from_text(text=text_content),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ReceiptData,
+                temperature=0.1,
+            ),
+        )
+
+        receipt_data = ReceiptData.model_validate_json(response.text)
+        elapsed = time.time() - start_time
+
+        return ExtractionResponse(
+            success=True,
+            filename=filename,
+            extraction_method="text_llm",
+            data=receipt_data,
+            processing_time_seconds=round(elapsed, 2),
+        )
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return ExtractionResponse(
+            success=False,
+            filename=filename,
+            extraction_method="text_llm",
+            error=f"{type(e).__name__}: {str(e)}",
+            processing_time_seconds=round(elapsed, 2),
+        )
+

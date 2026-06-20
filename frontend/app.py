@@ -14,9 +14,21 @@ cleanly separated — same architecture as a "real" app, just with Gradio
 as the presentation layer instead of React.
 """
 
+import sys
+import os
+
+# Fix sys.path to prevent 'frontend/app.py' from shadowing the backend 'app' package
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+while current_dir in sys.path:
+    sys.path.remove(current_dir)
+
 import json
 import time
-import os
+import tempfile
+import csv
 import httpx
 import gradio as gr
 import io
@@ -31,19 +43,25 @@ def preview_file(file):
         return None
     try:
         # Resolve actual file path from string, object, or dict
+        if isinstance(file, list):
+            if not file:
+                return None
+            file = file[0]
+
         if isinstance(file, str):
             file_path = file
-        elif hasattr(file, "name"):
-            file_path = file.name
-        elif isinstance(file, dict) and "name" in file:
-            file_path = file["name"]
+        elif isinstance(file, dict):
+            file_path = file.get("path") or file.get("name") or str(file)
         else:
-            file_path = str(file)
+            file_path = getattr(file, "path", None) or getattr(file, "name", None) or str(file)
 
         if not file_path or not os.path.exists(file_path):
             return None
 
         ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+        if ext in ("csv", "json", "txt"):
+            return None
+
         if ext == "pdf":
             import fitz
             doc = fitz.open(file_path)
@@ -63,130 +81,308 @@ def preview_file(file):
         return None
 
 
-async def extract_receipt(file, method="vision_llm") -> tuple[str, str, str, str]:
+def format_single_receipt_html(receipt: dict, filename: str = None) -> str:
+    from app.schemas import get_currency_symbol
+    sym = get_currency_symbol(receipt.get("currency"))
+    
+    # Header Details
+    vendor = receipt.get("vendor_name", "Unknown Store")
+    address = receipt.get("vendor_address") or ""
+    date_val = receipt.get("date") or "—"
+    time_val = receipt.get("time") or "—"
+    currency = receipt.get("currency") or "INR"
+    pay_method = receipt.get("payment_method") or "—"
+    
+    html = []
+    html.append(f'<div class="receipt-card">')
+    
+    # Header block
+    html.append(f'  <div class="receipt-card-header">')
+    if filename:
+        html.append(f'    <div class="receipt-card-subtitle" style="font-size: 11px; opacity: 0.6; font-family: monospace;">File: {filename}</div>')
+    html.append(f'    <h2 class="receipt-card-title">{vendor}</h2>')
+    if address:
+        html.append(f'    <div class="receipt-card-subtitle">{address}</div>')
+    html.append(f'  </div>')
+    
+    # Metadata Grid
+    html.append(f'  <div class="receipt-meta-grid">')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Date</span><span class="receipt-meta-val">{date_val}</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Time</span><span class="receipt-meta-val">{time_val}</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Currency</span><span class="receipt-meta-val">{currency} ({sym})</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Payment</span><span class="receipt-meta-val">{pay_method}</span></div>')
+    html.append(f'  </div>')
+    
+    # Items Table
+    html.append(f'  <table class="receipt-table">')
+    html.append(f'    <thead>')
+    html.append(f'      <tr>')
+    html.append(f'        <th>Item Description</th>')
+    html.append(f'        <th class="num-col" style="width: 50px;">Qty</th>')
+    html.append(f'        <th class="num-col" style="width: 80px;">Price</th>')
+    html.append(f'        <th class="num-col" style="width: 90px;">Total</th>')
+    html.append(f'      </tr>')
+    html.append(f'    </thead>')
+    html.append(f'    <tbody>')
+    
+    for item in receipt.get("line_items", []):
+        qty = item.get("quantity")
+        if qty is None:
+            qty = 1.0
+        try:
+            qty_val = float(qty)
+            qty_str = f"{qty_val:.0f}" if qty_val.is_integer() else f"{qty_val:.2f}"
+        except Exception:
+            qty_str = str(qty)
+            
+        u_price = item.get("unit_price") or 0.0
+        t_price = item.get("total_price") or 0.0
+        html.append(f'      <tr>')
+        html.append(f'        <td>{item.get("name", "Unknown Item")}</td>')
+        html.append(f'        <td class="num-col">{qty_str}</td>')
+        html.append(f'        <td class="num-col">{sym}{u_price:.2f}</td>')
+        html.append(f'        <td class="num-col">{sym}{t_price:.2f}</td>')
+        html.append(f'      </tr>')
+        
+    html.append(f'    </tbody>')
+    html.append(f'  </table>')
+    
+    # Totals Section
+    html.append(f'  <div class="receipt-totals-section">')
+    if receipt.get("subtotal") is not None:
+        html.append(f'    <div class="receipt-total-row"><span class="lbl">Subtotal</span><span class="val">{sym}{receipt["subtotal"]:.2f}</span></div>')
+    
+    discount_val = receipt.get("discount") or 0.0
+    if discount_val > 0:
+        html.append(f'    <div class="receipt-total-row discount-row"><span class="lbl">Discount Applied</span><span class="val">-{sym}{discount_val:.2f}</span></div>')
+    else:
+        html.append(f'    <div class="receipt-total-row"><span class="lbl">Discount</span><span class="val">{sym}0.00</span></div>')
+        
+    if receipt.get("tax") is not None:
+        html.append(f'    <div class="receipt-total-row"><span class="lbl">Tax</span><span class="val">{sym}{receipt["tax"]:.2f}</span></div>')
+    if receipt.get("tip") is not None:
+        html.append(f'    <div class="receipt-total-row"><span class="lbl">Tip/Gratuity</span><span class="val">{sym}{receipt["tip"]:.2f}</span></div>')
+        
+    html.append(f'    <div class="receipt-total-row grand-total"><span class="lbl">Total Amount</span><span class="val">{sym}{receipt["total"]:.2f}</span></div>')
+    html.append(f'  </div>')
+    
+    html.append(f'</div>')
+    return "\n".join(html)
+
+
+async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.Progress()) -> tuple[str, str, str, str, str | None]:
     """
-    Upload a file to the FastAPI backend and return the results.
-
-    Returns a tuple of (formatted_view, status_message, raw_json, validation_info)
-    for the four output components in the UI.
+    Upload file(s) or webcam capture to the FastAPI backend and return the results.
+    Returns a tuple of (formatted_view, status_message, raw_json, validation_info, excel_file_path).
     """
-    if file is None:
-        return "", "Please upload a receipt image or PDF.", "", ""
-
-    start = time.time()
-
+    import traceback
     try:
-        # Determine MIME type from file extension
-        filename = file.name if hasattr(file, "name") else "upload"
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        mime_map = {
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "png": "image/png",
-            "webp": "image/webp",
-            "pdf": "application/pdf",
-        }
-        mime_type = mime_map.get(ext, "application/octet-stream")
+        from app.schemas import get_currency_symbol
 
-        # Read file bytes
-        if hasattr(file, "read"):
-            file_bytes = file.read()
-        else:
-            with open(file, "rb") as f:
-                file_bytes = f.read()
+        # Combine input files
+        all_files = []
+        if files:
+            if isinstance(files, list):
+                all_files.extend(files)
+            else:
+                all_files.append(files)
+        if camera_file:
+            all_files.append(camera_file)
 
-        data = None
-        # On Render, bypass local network port bindings and invoke the pipeline directly in-process
-        if os.getenv("RENDER") == "true":
+        if not all_files:
+            return "", "Please upload a receipt image/PDF/CSV/JSON or capture one using webcam.", "", "", None
+
+        start = time.time()
+        successful_ids = []
+        results_summary = []
+        last_receipt_data = None
+        last_validation = None
+        all_extracted_data = []
+
+        progress(0, desc="Starting extraction pipeline...")
+
+        for idx, file_item in enumerate(all_files):
+            # Resolve actual path and filename robustly
+            actual_path = None
+            filename = None
+
+            if isinstance(file_item, str):
+                actual_path = file_item
+                filename = os.path.basename(file_item)
+            elif isinstance(file_item, dict):
+                actual_path = file_item.get("path") or file_item.get("name")
+                filename = file_item.get("orig_name") or (os.path.basename(actual_path) if actual_path else f"upload_{idx+1}")
+            else:
+                actual_path = getattr(file_item, "path", None) or getattr(file_item, "name", None)
+                filename = getattr(file_item, "orig_name", None) or (os.path.basename(actual_path) if actual_path else f"upload_{idx+1}")
+
+            if not actual_path:
+                actual_path = str(file_item)
+                filename = f"upload_{idx+1}"
+
+            progress((idx / len(all_files)), desc=f"Extracting {filename} ({idx+1}/{len(all_files)})...")
+
             try:
-                from app.main import _process_single_file
-                from fastapi import UploadFile
-                
-                upload_file = UploadFile(
-                    file=io.BytesIO(file_bytes),
-                    filename=filename.split("/")[-1].split("\\")[-1],
-                    headers={"content-type": mime_type}
-                )
-                result = await _process_single_file(upload_file, method)
-                data = result.model_dump()
-                elapsed = time.time() - start
-                print("[Render] Direct in-process extraction succeeded.")
+                # Determine MIME type
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                mime_map = {
+                    "jpg": "image/jpeg",
+                    "jpeg": "image/jpeg",
+                    "png": "image/png",
+                    "webp": "image/webp",
+                    "pdf": "application/pdf",
+                    "csv": "text/csv",
+                    "json": "application/json",
+                    "txt": "text/plain",
+                }
+                mime_type = mime_map.get(ext, "application/octet-stream")
+
+                # Read file bytes
+                with open(actual_path, "rb") as f:
+                    file_bytes = f.read()
+
+                data = None
+                # On Render, bypass local network port bindings and invoke the pipeline directly in-process
+                if os.getenv("RENDER") == "true":
+                    try:
+                        from app.main import _process_single_file
+                        from fastapi import UploadFile
+                        
+                        upload_file = UploadFile(
+                            file=io.BytesIO(file_bytes),
+                            filename=filename,
+                            headers={"content-type": mime_type}
+                        )
+                        result = await _process_single_file(upload_file, method)
+                        data = result.model_dump()
+                    except Exception as e:
+                        print(f"[Render] Direct extraction failed: {e}. Falling back to HTTP.")
+
+                # Fallback (or local development execution path)
+                if data is None:
+                    with httpx.Client(timeout=120.0) as client:
+                        response = client.post(
+                            f"{API_BASE}/upload",
+                            params={"method": method},
+                            files={"file": (filename, file_bytes, mime_type)},
+                        )
+                    data = response.json()
+
+                if data.get("success"):
+                    receipt = data["data"]
+                    receipt_id = data.get("id")
+                    if receipt_id:
+                        successful_ids.append(receipt_id)
+
+                    last_receipt_data = receipt
+                    last_validation = data.get("validation")
+                    all_extracted_data.append(receipt)
+
+                    sym = get_currency_symbol(receipt.get("currency"))
+                    discount_amt = receipt.get("discount") or 0.0
+                    results_summary.append({
+                        "filename": filename,
+                        "vendor": receipt.get("vendor_name", "Unknown"),
+                        "date": receipt.get("date", "Unknown"),
+                        "total": f"{sym}{receipt.get('total', 0.0):.2f}",
+                        "discount": f"-{sym}{discount_amt:.2f}" if discount_amt > 0 else "—",
+                        "currency": receipt.get("currency", "INR"),
+                        "status": "✓ Success",
+                        "confidence": (data.get("validation", {}).get("overall_confidence") or "high").upper()
+                    })
+                else:
+                    error_msg = data.get("error", "Unknown error")
+                    results_summary.append({
+                        "filename": filename,
+                        "vendor": "—",
+                        "date": "—",
+                        "total": "—",
+                        "discount": "—",
+                        "currency": "—",
+                        "status": f"✗ Failed: {error_msg}",
+                        "confidence": "LOW"
+                    })
+
             except Exception as e:
-                print(f"[Render] Direct extraction failed: {e}. Falling back to HTTP.")
+                results_summary.append({
+                    "filename": filename,
+                    "vendor": "—",
+                    "date": "—",
+                    "total": "—",
+                    "discount": "—",
+                    "currency": "—",
+                    "status": f"✗ Error: {type(e).__name__}",
+                    "confidence": "LOW"
+                })
 
-        # Fallback (or local development execution path)
-        if data is None:
-            with httpx.Client(timeout=120.0) as client:
-                response = client.post(
-                    f"{API_BASE}/upload",
-                    params={"method": method},
-                    files={"file": (filename.split("/")[-1].split("\\")[-1], file_bytes, mime_type)},
-                )
-            elapsed = time.time() - start
-            data = response.json()
+        elapsed = time.time() - start
 
-        if data.get("success"):
-            receipt = data["data"]
+        if not successful_ids:
+            # None of the files succeeded
+            summary = "### Batch Processing Failed\n\nNo files were successfully processed."
+            status = f"Batch extraction failed in {elapsed:.1f}s."
+            return summary, status, "", "", gr.update(visible=False)
 
-            # Format a human-readable summary
+        # Generate combined Excel file for download
+        excel_path = None
+        try:
+            from app.export import generate_excel as backend_generate_excel
+            excel_bytes = backend_generate_excel(receipt_ids=successful_ids)
+            excel_path = os.path.join(tempfile.gettempdir(), f"combined_export_{int(time.time())}.xlsx")
+            with open(excel_path, "wb") as f:
+                f.write(excel_bytes)
+        except Exception as e:
+            print(f"Error generating combined Excel: {e}")
+
+        # Build response summary
+        if len(all_files) == 1:
+            # Single file layout
+            receipt = last_receipt_data
+            filename = results_summary[0]["filename"] if results_summary else None
+            summary = format_single_receipt_html(receipt, filename)
+            status = f"Extraction successful in {elapsed:.1f}s"
+            editable_json = json.dumps(receipt, indent=2)
+            validation_md = _format_validation(last_validation)
+        else:
+            # Multi-file batch layout
             summary_lines = [
-                f"## {receipt['vendor_name']}",
+                "## Batch Extraction Summary",
                 "",
+                f"Successfully processed **{len(successful_ids)}/{len(all_files)}** files.",
+                "",
+                "| File Name | Vendor | Date | Total | Discount | Currency | Status | Confidence |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
             ]
-            if receipt.get("vendor_address"):
-                summary_lines.append(f"**Address:** {receipt['vendor_address']}")
-            if receipt.get("date"):
-                summary_lines.append(f"**Date:** {receipt['date']}")
-            if receipt.get("time"):
-                summary_lines.append(f"**Time:** {receipt['time']}")
-            summary_lines.append(f"**Currency:** {receipt['currency']}")
-            summary_lines.append("")
-            summary_lines.append("### Items")
-            summary_lines.append("| Item | Qty | Unit Price | Total |")
-            summary_lines.append("|------|-----|-----------|-------|")
-            for item in receipt.get("line_items", []):
+            for res in results_summary:
                 summary_lines.append(
-                    f"| {item['name']} | {item['quantity']} | "
-                    f"${item['unit_price']:.2f} | ${item['total_price']:.2f} |"
+                    f"| {res['filename']} | {res['vendor']} | {res['date']} | {res['total']} | {res['discount']} | {res['currency']} | {res['status']} | {res['confidence']} |"
                 )
+
             summary_lines.append("")
-            if receipt.get("subtotal") is not None:
-                summary_lines.append(f"**Subtotal:** ${receipt['subtotal']:.2f}")
-            if receipt.get("tax") is not None:
-                summary_lines.append(f"**Tax:** ${receipt['tax']:.2f}")
-            if receipt.get("tip") is not None:
-                summary_lines.append(f"**Tip:** ${receipt['tip']:.2f}")
-            summary_lines.append(f"### Total: ${receipt['total']:.2f}")
-            if receipt.get("payment_method"):
-                summary_lines.append(f"**Payment:** {receipt['payment_method']}")
+            summary_lines.append("---")
+            summary_lines.append("## Detailed Invoice Breakdowns")
+            summary_lines.append("")
+
+            # Append each receipt's HTML card
+            for idx, receipt in enumerate(all_extracted_data):
+                fname = results_summary[idx]["filename"] if idx < len(results_summary) else None
+                summary_lines.append(format_single_receipt_html(receipt, fname))
 
             summary = "\n".join(summary_lines)
+            status = f"Batch extraction complete in {elapsed:.1f}s. Processed {len(successful_ids)}/{len(all_files)} successfully."
+            editable_json = json.dumps(all_extracted_data, indent=2)
+            validation_md = _format_validation(last_validation)
 
-            status = (
-                f"Extraction successful in {elapsed:.1f}s "
-                f"(API: {data.get('processing_time_seconds', '?')}s)"
-            )
+        excel_update = gr.update(value=excel_path, visible=True) if excel_path else gr.update(visible=False)
+        return summary, status, editable_json, validation_md, excel_update
 
-            # Editable JSON
-            editable_json = json.dumps(receipt, indent=2)
-
-            # Format validation results
-            validation_md = _format_validation(data.get("validation"))
-
-            return summary, status, editable_json, validation_md
-        else:
-            error_msg = data.get("error", "Unknown error")
-            return "", f"Extraction failed: {error_msg}", "", ""
-
-    except httpx.ConnectError:
-        return (
-            "",
-            "Cannot connect to API server. Make sure the FastAPI backend is running on port 8000.",
-            "",
-            "",
-        )
     except Exception as e:
-        return "", f"Error: {type(e).__name__}: {str(e)}", "", ""
+        tb = traceback.format_exc()
+        with open("frontend_error.log", "w") as f:
+            f.write(tb)
+        print(f"CRITICAL ERROR IN GRADIO UI:\n{tb}")
+        err_summary = f"### An Error Occurred\n\n**Error Type:** `{type(e).__name__}`\n\n**Message:** {str(e)}\n\nCheck `frontend_error.log` for the full traceback."
+        return err_summary, f"Error: {type(e).__name__}", "", "", gr.update(visible=False)
 
 
 def save_edited_json(json_text: str) -> str:
@@ -195,74 +391,176 @@ def save_edited_json(json_text: str) -> str:
         return "No data to validate."
     try:
         data = json.loads(json_text)
-        return f"JSON is valid. {len(data)} top-level fields."
+        return f"JSON is valid. {len(data) if isinstance(data, dict) else len(data)} records/fields."
     except json.JSONDecodeError as e:
         return f"Invalid JSON: {e}"
 
 
-def export_json(json_text: str) -> str | None:
+def export_json(json_text: str):
     """Export the current JSON to a downloadable file."""
     if not json_text.strip():
-        return None
+        return gr.update(visible=False)
     try:
-        # Validate
         data = json.loads(json_text)
-        # Write to temp file
-        import tempfile
-        import os
         
-        vendor = data.get("vendor_name", "receipt").replace(" ", "_")[:20]
-        date = data.get("date", "unknown")
-        fname = f"{vendor}_{date}.json"
+        if isinstance(data, list):
+            fname = f"receipts_batch_{int(time.time())}.json"
+        else:
+            vendor = data.get("vendor_name", "receipt").replace(" ", "_")[:20]
+            date = data.get("date", "unknown")
+            fname = f"{vendor}_{date}.json"
         
         path = os.path.join(tempfile.gettempdir(), fname)
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        return path
+        return gr.update(value=path, visible=True)
     except Exception:
-        return None
+        return gr.update(visible=False)
 
 
-def export_csv(json_text: str) -> str | None:
+def export_csv(json_text: str):
     """Export line items as CSV."""
     if not json_text.strip():
-        return None
+        return gr.update(visible=False)
     try:
-        import csv
-        import tempfile
-        import os
-        
         data = json.loads(json_text)
-        vendor = data.get("vendor_name", "receipt").replace(" ", "_")[:20]
-        date = data.get("date", "unknown")
-        fname = f"{vendor}_{date}.csv"
+        if isinstance(data, list):
+            data_list = data
+            fname = f"receipts_batch_{int(time.time())}.csv"
+        else:
+            data_list = [data]
+            vendor = data.get("vendor_name", "receipt").replace(" ", "_")[:20]
+            date = data.get("date", "unknown")
+            fname = f"{vendor}_{date}.csv"
         
         path = os.path.join(tempfile.gettempdir(), fname)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            # Header row with receipt metadata
-            writer.writerow(["Vendor", "Date", "Currency", "Subtotal", "Tax", "Total"])
             writer.writerow([
-                data.get("vendor_name", ""),
-                data.get("date", ""),
-                data.get("currency", ""),
-                data.get("subtotal", ""),
-                data.get("tax", ""),
-                data.get("total", ""),
+                "Vendor", "Date", "Currency", "Item Name", "Quantity", "Unit Price", "Total Price",
+                "Subtotal", "Discount", "Tax", "Tip", "Total"
             ])
-            writer.writerow([])
-            # Line items
-            writer.writerow(["Item", "Quantity", "Unit Price", "Total Price"])
-            for item in data.get("line_items", []):
-                writer.writerow([
-                    item.get("name", ""),
-                    item.get("quantity", ""),
-                    item.get("unit_price", ""),
-                    item.get("total_price", ""),
-                ])
-        return path
+            for receipt in data_list:
+                line_items = receipt.get("line_items", [])
+                if line_items:
+                    for item in line_items:
+                        writer.writerow([
+                            receipt.get("vendor_name", ""),
+                            receipt.get("date", ""),
+                            receipt.get("currency", ""),
+                            item.get("name", ""),
+                            item.get("quantity", ""),
+                            item.get("unit_price", ""),
+                            item.get("total_price", ""),
+                            receipt.get("subtotal", ""),
+                            receipt.get("discount", 0.0),
+                            receipt.get("tax", ""),
+                            receipt.get("tip", ""),
+                            receipt.get("total", ""),
+                        ])
+                else:
+                    writer.writerow([
+                        receipt.get("vendor_name", ""),
+                        receipt.get("date", ""),
+                        receipt.get("currency", ""),
+                        "", "", "", "",
+                        receipt.get("subtotal", ""),
+                        receipt.get("discount", 0.0),
+                        receipt.get("tax", ""),
+                        receipt.get("tip", ""),
+                        receipt.get("total", ""),
+                    ])
+        return gr.update(value=path, visible=True)
     except Exception:
-        return None
+        return gr.update(visible=False)
+
+
+def export_excel(json_text: str):
+    """Export the current receipt data (single or list) to Excel."""
+    if not json_text.strip():
+        return gr.update(visible=False)
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        raw_data = json.loads(json_text)
+        if isinstance(raw_data, list):
+            data_list = raw_data
+        else:
+            data_list = [raw_data]
+
+        fname = f"receipts_export_{int(time.time())}.xlsx"
+        path = os.path.join(tempfile.gettempdir(), fname)
+
+        wb = Workbook()
+
+        # Sheet 1: Receipts Summary
+        ws1 = wb.active
+        ws1.title = "Receipts"
+
+        headers1 = [
+            "Vendor", "Date", "Currency",
+            "Subtotal", "Discount", "Tax", "Tip", "Total",
+            "Payment Method"
+        ]
+
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+
+        for col, header in enumerate(headers1, 1):
+            cell = ws1.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        for row_idx, item in enumerate(data_list, 2):
+            ws1.cell(row=row_idx, column=1, value=item.get("vendor_name", ""))
+            ws1.cell(row=row_idx, column=2, value=item.get("date", ""))
+            ws1.cell(row=row_idx, column=3, value=item.get("currency", ""))
+            ws1.cell(row=row_idx, column=4, value=item.get("subtotal"))
+            ws1.cell(row=row_idx, column=5, value=item.get("discount", 0.0))
+            ws1.cell(row=row_idx, column=6, value=item.get("tax"))
+            ws1.cell(row=row_idx, column=7, value=item.get("tip"))
+            ws1.cell(row=row_idx, column=8, value=item.get("total"))
+            ws1.cell(row=row_idx, column=9, value=item.get("payment_method", ""))
+
+        for col in ws1.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws1.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+
+        # Sheet 2: Line Items
+        ws2 = wb.create_sheet("Line Items")
+
+        headers2 = [
+            "Vendor", "Date", "Item Name", "Quantity", "Unit Price", "Line Total"
+        ]
+
+        for col, header in enumerate(headers2, 1):
+            cell = ws2.cell(row=1, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        row_idx = 2
+        for receipt in data_list:
+            for item in receipt.get("line_items", []):
+                ws2.cell(row=row_idx, column=1, value=receipt.get("vendor_name", ""))
+                ws2.cell(row=row_idx, column=2, value=receipt.get("date", ""))
+                ws2.cell(row=row_idx, column=3, value=item.get("name", ""))
+                ws2.cell(row=row_idx, column=4, value=item.get("quantity"))
+                ws2.cell(row=row_idx, column=5, value=item.get("unit_price"))
+                ws2.cell(row=row_idx, column=6, value=item.get("total_price"))
+                row_idx += 1
+
+        for col in ws2.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws2.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+
+        wb.save(path)
+        return gr.update(value=path, visible=True)
+    except Exception as e:
+        print(f"Error exporting Excel: {e}")
+        return gr.update(visible=False)
 
 
 def _format_validation(validation: dict | None) -> str:
@@ -888,11 +1186,151 @@ body, html, .gradio-container, .main, .gradio-container > div {
     color: var(--color-mist) !important;
     text-decoration: underline !important;
 }
+
+/* Receipt Card Styles */
+.receipt-card {
+    background-color: var(--color-charcoal) !important;
+    border: 1px solid var(--color-graphite) !important;
+    border-radius: 8px !important;
+    padding: 24px !important;
+    margin-bottom: 24px !important;
+    box-shadow: var(--shadow-xl) !important;
+    font-family: var(--font-inter) !important;
+    color: var(--color-snow) !important;
+}
+
+.receipt-card-header {
+    text-align: center !important;
+    margin-bottom: 20px !important;
+    border-bottom: 1px dashed var(--color-steel) !important;
+    padding-bottom: 16px !important;
+}
+
+.receipt-card-title {
+    font-size: 22px !important;
+    font-weight: 700 !important;
+    color: var(--color-acid-lime) !important;
+    margin: 0 0 6px 0 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.02em !important;
+}
+
+.receipt-card-subtitle {
+    font-size: 13px !important;
+    color: var(--color-fog) !important;
+    margin: 2px 0 !important;
+}
+
+.receipt-meta-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 12px !important;
+    font-size: 13px !important;
+    margin-bottom: 20px !important;
+    background: var(--color-onyx) !important;
+    padding: 12px 16px !important;
+    border-radius: 6px !important;
+    border: 1px solid rgba(229, 230, 235, 0.05) !important;
+}
+
+.receipt-meta-item {
+    display: flex !important;
+    justify-content: space-between !important;
+    color: var(--color-snow) !important;
+}
+
+.receipt-meta-label {
+    color: var(--color-fog) !important;
+    font-weight: 500 !important;
+}
+
+.receipt-meta-val {
+    font-weight: 600 !important;
+    text-align: right !important;
+}
+
+.receipt-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    margin-bottom: 20px !important;
+    font-size: 13px !important;
+}
+
+.receipt-table th {
+    border-bottom: 1px solid var(--color-steel) !important;
+    padding: 8px 4px !important;
+    text-align: left !important;
+    color: var(--color-fog) !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    font-size: 11px !important;
+    letter-spacing: 0.05em !important;
+}
+
+.receipt-table td {
+    padding: 10px 4px !important;
+    border-bottom: 1px solid rgba(229, 230, 235, 0.05) !important;
+    color: var(--color-snow) !important;
+}
+
+.receipt-table th.num-col, .receipt-table td.num-col {
+    text-align: right !important;
+}
+
+.receipt-totals-section {
+    border-top: 1px dashed var(--color-steel) !important;
+    padding-top: 16px !important;
+    margin-top: 16px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    gap: 6px !important;
+    font-size: 13px !important;
+}
+
+.receipt-total-row {
+    display: flex !important;
+    justify-content: space-between !important;
+    width: 100% !important;
+    max-width: 260px !important;
+}
+
+.receipt-total-row.discount-row {
+    color: var(--color-emerald) !important;
+    font-weight: 500 !important;
+}
+
+.receipt-total-row.grand-total {
+    border-top: 1px solid var(--color-steel) !important;
+    padding-top: 8px !important;
+    margin-top: 4px !important;
+    font-size: 16px !important;
+    font-weight: 700 !important;
+}
+
+.receipt-total-row.grand-total .val {
+    color: var(--color-acid-lime) !important;
+}
+
+.receipt-total-row .lbl {
+    color: var(--color-fog) !important;
+}
+
+.receipt-total-row.discount-row .lbl {
+    color: var(--color-emerald) !important;
+}
+
+.receipt-total-row.grand-total .lbl {
+    color: var(--color-snow) !important;
+}
+
+.receipt-total-row .val {
+    font-weight: 600 !important;
+}
 """
 
 with gr.Blocks(
     title="Invoize",
-    css=custom_css,
 ) as demo:
     demo.css = custom_css
     gr.HTML(f"<style>{custom_css}</style>")
@@ -902,20 +1340,30 @@ with gr.Blocks(
             with gr.Column():
                 gr.HTML('<div class="brand-title">Invoize</div>')
                 
-                # File Input Area
-                file_input = gr.File(
-                    label="Drop receipt or invoice here",
-                    file_types=[".jpg", ".jpeg", ".png", ".webp", ".pdf"],
-                    type="filepath",
-                    elem_classes=["panel-card"]
-                )
-                
-                # Live Preview Image Component (Visible Uploaded File)
-                preview_image = gr.Image(
-                    label="DOCUMENT PREVIEW",
-                    interactive=False,
-                    elem_classes=["preview-box"]
-                )
+                with gr.Tabs(elem_classes=["dark-tabs"]):
+                    with gr.TabItem("Upload File(s)"):
+                        # File Input Area (Multi-file support)
+                        file_input = gr.File(
+                            label="Drop receipt(s) or invoice(s) here",
+                            file_types=[".jpg", ".jpeg", ".png", ".webp", ".pdf", ".csv", ".json"],
+                            file_count="multiple",
+                            type="filepath",
+                            elem_classes=["panel-card"]
+                        )
+                        # Live Preview Image Component (Visible Uploaded File)
+                        preview_image = gr.Image(
+                            label="DOCUMENT PREVIEW",
+                            interactive=False,
+                            elem_classes=["preview-box"]
+                        )
+                    with gr.TabItem("Camera Capture"):
+                        # Webcam input
+                        camera_input = gr.Image(
+                            label="Capture receipt with webcam",
+                            sources=["webcam"],
+                            type="filepath",
+                            elem_classes=["panel-card"]
+                        )
             
 
 
@@ -975,9 +1423,11 @@ with gr.Blocks(
                 with gr.Row():
                     export_json_btn = gr.Button("DOWNLOAD JSON", elem_classes=["btn-secondary"])
                     export_csv_btn = gr.Button("DOWNLOAD CSV", elem_classes=["btn-secondary"])
+                    export_excel_btn = gr.Button("DOWNLOAD EXCEL", elem_classes=["btn-secondary"])
                 
                 json_file = gr.File(label="JSON Download", visible=False, elem_classes=["dark-input"])
                 csv_file = gr.File(label="CSV Download", visible=False, elem_classes=["dark-input"])
+                excel_file = gr.File(label="Excel Download", visible=False, elem_classes=["dark-input"])
 
                 gr.HTML(
                     '<div class="legal-text">'
@@ -1006,8 +1456,8 @@ with gr.Blocks(
 
     extract_btn.click(
         fn=extract_receipt,
-        inputs=[file_input, method_input],
-        outputs=[formatted_output, status_output, json_editor, validation_output],
+        inputs=[file_input, camera_input, method_input],
+        outputs=[formatted_output, status_output, json_editor, validation_output, excel_file],
     )
 
     validate_btn.click(
@@ -1026,6 +1476,12 @@ with gr.Blocks(
         fn=export_csv,
         inputs=[json_editor],
         outputs=[csv_file],
+    )
+
+    export_excel_btn.click(
+        fn=export_excel,
+        inputs=[json_editor],
+        outputs=[excel_file],
     )
 
 

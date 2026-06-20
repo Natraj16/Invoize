@@ -42,6 +42,9 @@ class Settings:
         "image/png",
         "image/webp",
         "application/pdf",
+        "text/csv",
+        "application/json",
+        "text/plain",
     }
 
     # --- Paths ---

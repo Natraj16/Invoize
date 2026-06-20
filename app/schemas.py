@@ -69,10 +69,10 @@ class ReceiptData(BaseModel):
         description="Transaction time in HH:MM format (24-hour) if visible",
     )
     currency: str = Field(
-        default="USD",
+        default="INR",
         description="3-letter ISO 4217 currency code. "
-        "Infer from currency symbols ($ → USD, € → EUR, £ → GBP, ₹ → INR) "
-        "or explicit text on the receipt.",
+        "Infer from currency symbols ($ → USD, € → EUR, £ → GBP, ₹ → INR, Rs → INR) "
+        "or explicit text on the receipt. Defaults to INR if not specified.",
     )
     line_items: list[LineItem] = Field(
         default_factory=list,
@@ -82,6 +82,10 @@ class ReceiptData(BaseModel):
     subtotal: Optional[float] = Field(
         default=None,
         description="Subtotal before tax, as printed on the receipt",
+    )
+    discount: Optional[float] = Field(
+        default=0.0,
+        description="Any total discount amount applied to the entire bill if visible, else 0.0",
     )
     tax: Optional[float] = Field(
         default=None,
@@ -116,6 +120,10 @@ class ExtractionResponse(BaseModel):
         default="vision_llm",
         description="Which extraction path was used: 'vision_llm' or 'ocr_llm'",
     )
+    id: Optional[str] = Field(
+        default=None,
+        description="Database record ID if successfully saved to storage",
+    )
     data: Optional[ReceiptData] = Field(
         default=None,
         description="Extracted receipt data, null if extraction failed",
@@ -134,3 +142,18 @@ class ExtractionResponse(BaseModel):
         default=None,
         description="Wall-clock time for the full extraction pipeline",
     )
+
+
+def get_currency_symbol(currency_code: str) -> str:
+    """Return the corresponding currency symbol for an ISO 4217 code."""
+    symbols = {
+        "INR": "₹",
+        "USD": "$",
+        "EUR": "€",
+        "GBP": "£",
+        "JPY": "¥",
+        "CAD": "C$",
+        "AUD": "A$",
+    }
+    return symbols.get((currency_code or "").upper(), "₹" if (currency_code or "").upper() == "INR" else "$")
+
