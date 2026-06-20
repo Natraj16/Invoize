@@ -8,27 +8,31 @@ Built with a clean separation of concerns, the system features a **FastAPI backe
 
 ## 🏗️ Architecture Overview
 
-The pipeline supports dual-execution paths for comparing performance and precision:
+The pipeline supports three execution paths for comparing performance and optimization:
 
 ```mermaid
 graph TD
     %% Input Layer
-    A["Upload (Image or PDF)"] --> B["FastAPI Backend (/upload)"]
+    A["Upload (Image/PDF/CSV/JSON)"] --> B["FastAPI Backend (/upload)"]
     
     %% Input Routing
-    B --> C{"Extraction Path?"}
+    B --> C{"Input Type?"}
     
     %% Path A: Direct Vision
-    C -->|"Path A (Default)"| D["Gemini 2.5 Flash Vision"]
+    C -->|"Image/PDF (Vision)"| D["Gemini 2.5 Flash Vision"]
     
     %% Path B: Local OCR + LLM
-    C -->|"Path B"| E["OpenCV Preprocessing"]
+    C -->|"Image/PDF (OCR)"| E["OpenCV Preprocessing"]
     E --> F["Tesseract OCR (Local)"]
     F --> G["Gemini 2.5 Flash (Text parsing)"]
+    
+    %% Path C: Hybrid Offline Parser
+    C -->|"Structured Text (CSV/JSON)"| Z["Offline Text Parser (Python)"]
     
     %% Structured Output
     D --> H["Structured Receipt Schema (Pydantic)"]
     G --> H
+    Z --> H
     
     %% Validation & Confidence
     H --> I["Deterministic Validation Layer"]
@@ -41,6 +45,7 @@ graph TD
     
     style D fill:#d4ebf2,stroke:#0277bd,stroke-width:2px
     style G fill:#d4ebf2,stroke:#0277bd,stroke-width:2px
+    style Z fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style I fill:#fbe9e7,stroke:#d84315,stroke-width:2px
 ```
 
@@ -48,45 +53,36 @@ graph TD
 
 ## ✨ Core Features
 
-*   👁️ **Vision-First Extraction (Path A)**: Feeds documents directly to Gemini 2.5 Flash. Uses visual layout context to reliably identify misaligned, crumpled, or folded receipt items.
-*   🤖 **Local OCR + LLM Parsing (Path B)**: Runs local **OpenCV** image processing (grayscale conversion, adaptive thresholding, bilateral filtering) -> extracts raw text using **Tesseract OCR** -> structures text using Gemini.
-*   📏 **Independent Validation Layer**: A deterministic validation engine checking mathematical integrity (e.g. `quantity × unit_price = total_price`, `subtotal + tax = total`) and flagging future dates or suspicious fields.
+*   👁️ **Vision-First Extraction (Path A)**: Feeds documents directly to Gemini 2.5 Flash. Uses visual layout context to reliably identify items.
+*   🤖 **Local OCR + LLM Parsing (Path B)**: Runs local **OpenCV** image processing (grayscale, adaptive thresholding, bilateral filtering) → extracts raw text using **Tesseract OCR** → structures text using Gemini.
+*   ⚡ **Hybrid Offline Parser (Path C)**: Automatically detects structured file uploads (`.json`, `.csv`). Parses and maps them directly in Python without making any Gemini API calls. This preserves API quota, runs instantly, and handles offline imports seamlessly.
+*   🇮🇳 **Indian Rupees (INR) Support**: Native currency support for mapping Rupees (`₹`, `Rs`, `Rupees`) to INR, with mathematical validation and clean symbol formatting.
+*   📷 **Webcam Shutter Capture**: Support for snapping pictures directly inside mobile and desktop web browsers.
+*   📏 **Independent Validation Layer**: A deterministic validation engine checking mathematical integrity (e.g. `quantity × unit_price = total_price`, `subtotal - discount + tax + tip = total`) and flagging future dates or suspicious fields.
 *   💾 **Relational SQL Database**: Persists parsed receipts in SQLite using a normalized schema (a `receipts` metadata table and a denormalized `line_items` table).
 *   📊 **CSV & Excel Export**: Downloads compiled records into a flat CSV (one row per item) or a styled, multi-sheet Excel workbook.
-*   💻 **Obsidian Dark Theme UI**: A flat, premium dark interface built with Gradio for drag-and-drop uploads, interactive schema validation, and live document previewing.
+*   📱 **Mobile Responsive Theme**: A beautiful obsidian dark interface built with Gradio that adapts gracefully to mobile viewports.
 
 ---
 
 ## 🧠 Key Engineering Decisions
 
-### 1. Constrained Decoding (Pydantic Schema Enforcement)
-Instead of relying on prompt engineering ("Respond in JSON format"), Invoize uses Gemini's native `response_schema` mode. The API client enforces structured generation directly at the LLM decoding stage:
-*   **Result**: 0% schema format errors. Malformed JSON, missing fields, or invalid types are physically impossible at the model generation layer.
+### 1. Hybrid Parser Routing (API Quota Protection)
+To handle Gemini free-tier rate limits (such as a 20 request daily limit), Invoize routes CSV and JSON uploads through a custom Python parser. It maps fields like store name, dates, discounts, and line items offline. If it's an arbitrary JSON layout, it falls back to the LLM.
 
-### 2. Independent Deterministic Validation
-LLMs are prone to arithmetic errors and hallucinated confidence. Invoize implements an independent, deterministic Python validation layer:
-*   Performs strict floating-point math validations with rounding tolerances.
-*   Calculates a weighted completeness score and flags instances requiring manual review.
-*   Outputs a trust indicator (`high`, `medium`, `low`) before DB commit.
+### 2. Rate-Limit Resilience (Backoff and Retries)
+When processing files in batches, Invoize implements two layers of rate-limit protection:
+*   **Frontend Safety Delay**: Introduces a `1.5s` delay between sequential files.
+*   **Exponential Backoff**: A backend retry wrapper handles `429 RESOURCE_EXHAUSTED` responses from Gemini by automatically sleeping and retrying.
 
----
-
-## 📊 Benchmark Results
-
-Both pipelines were benchmarked using a sample receipt with known ground truth to measure precision and processing speed. 
-
-| Pipeline | Success Rate | Average Accuracy | Average Processing Time |
-| :--- | :---: | :---: | :---: |
-| **Path A: Vision LLM** (Gemini 2.5 Flash) | **1/1 (100.0%)** | **100.0%** | **8.89 seconds** |
-| **Path B: OCR + LLM** (Tesseract + Gemini) | 1/1 (100.0%) | 41.7% | 4.56 seconds |
-
-### Key Findings
-1.  **Layout Awareness**: Path A (Vision-First) correctly associates price fields with their items based on spatial columns. Path B (OCR+LLM) struggles with column alignments because raw OCR output flattens layout spatial info.
-2.  **Noise Robustness**: OCR engines are highly sensitive to shadows and wrinkles, leading to character misreads (e.g., total `13.65` read as `9.47`), while the Vision model successfully extracts correct totals.
+### 3. Independent Deterministic Validation
+LLMs are prone to arithmetic errors. Invoize implements an independent, deterministic validation layer that validates mathematics with float-rounding tolerances, calculates trust indicators (`high`, `medium`, `low`), and flags records requiring human review.
 
 ---
 
 ## 🛠️ Project Structure
+
+Below is the directory structure. Only clean code and configurations are pushed to the repository; local runtime files are ignored.
 
 ```
 Invoize/
@@ -94,7 +90,7 @@ Invoize/
 │   ├── __init__.py
 │   ├── main.py              # FastAPI app & endpoint routing
 │   ├── config.py            # Central configuration & path loading
-│   ├── schemas.py           # Pydantic data models (ReceiptData)
+│   ├── schemas.py           # Pydantic data models & symbol mapping
 │   ├── validation.py        # Independent math validator
 │   ├── storage.py           # SQLite CRUD operations
 │   ├── export.py            # CSV & Excel exporters
@@ -103,13 +99,17 @@ Invoize/
 │       ├── __init__.py
 │       ├── vision_llm.py    # Path A: Gemini Vision
 │       ├── ocr.py           # Path B: OpenCV + Tesseract OCR
-│       └── pdf_handler.py   # PDF to image helper
+│       ├── pdf_handler.py   # PDF to image helper
+│       ├── text_parser.py   # Path C: Direct JSON/CSV offline mapper
+│       └── retry_helper.py  # Exponential backoff rate-limit helper
 ├── frontend/
-│   └── app.py               # Gradio UI application & styles
+│   └── app.py               # Gradio UI application & responsive styles
 ├── tests/
 │   └── test_set/            # Test images & ground truth JSONs
+│       ├── receipt_1.png
+│       └── receipt_1.json
 ├── .env.example             # Environment configuration template
-├── .gitignore               # Ignored local databases and cache folders
+├── .gitignore               # Excludes secrets (e.g. .env) & DB files
 ├── requirements.txt         # Project dependencies
 └── run.py                   # Unified developer server launcher
 ```
@@ -120,15 +120,15 @@ Invoize/
 
 ### 1. Prerequisites
 *   Python 3.10+
-*   (Optional for Path B) **Tesseract OCR** installed locally:
-    *   *Windows*: Run `winget install UB-Mannheim.TesseractOCR` in PowerShell (Invoize automatically scans the default directory `C:\Program Files\Tesseract-OCR\tesseract.exe`).
+*   (Optional for Path B) **Tesseract OCR** installed locally.
 
 ### 2. Installation
-Clone the repository and set up a virtual environment:
+Set up a virtual environment and install dependencies:
 ```bash
 # Create and activate virtual environment
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate      # On Windows
+source venv/bin/activate   # On macOS/Linux
 
 # Install requirements
 pip install -r requirements.txt
@@ -137,37 +137,39 @@ pip install -r requirements.txt
 ### 3. Configuration
 1.  Copy `.env.example` to `.env`.
 2.  Acquire a free Gemini API key from [Google AI Studio](https://aistudio.google.com).
-3.  Add it to your environment variables file:
+3.  Add it to your `.env` file:
     ```env
-    GEMINI_API_KEY=your-actual-api-key-here
+    GEMINI_API_KEY=your_gemini_api_key_here
     ```
 
 ### 4. Running the Application
-Start both the FastAPI backend and Gradio frontend with the unified launcher script:
+Start both the FastAPI backend and Gradio frontend:
 ```bash
 python run.py
 ```
-
-*   **FastAPI Backend**: Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) to access interactive Swagger API documentation.
-*   **Gradio UI**: Open [http://127.0.0.1:7860](http://127.0.0.1:7860) to access the interactive web client.
-
----
-
-## 🧪 Testing and Benchmarking
-
-To run the integration benchmark suite and update performance metrics:
-```bash
-python -m app.benchmark
-```
-This runs the dual-pipeline tests on files inside `tests/test_set/` and updates the `docs/benchmark_results.md` report.
+*   **FastAPI Backend**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) (Swagger API docs)
+*   **Gradio UI**: [http://127.0.0.1:7860](http://127.0.0.1:7860) (Interactive Web Client)
 
 ---
 
-## 🗺️ Roadmap & Future Enhancements
+## 📦 What to Push to GitHub
 
-The next phase of developments for Invoize includes:
-*   📥 **Enhanced Exports**: Direct download files for CSV and JSON raw outputs in the frontend.
-*   📊 **Batch processing & Excel aggregation**: Uploading multiple bills in a single batch to compile them into a unified multi-sheet Excel summary workbook.
-*   🇮🇳 **Indian Rupees (INR) Currency Support**: Localized formatting and validation checks for Rupees `₹` symbols and calculations.
-*   📷 **Mobile Camera Capture**: Supporting real-time snapshots to scan and upload bills directly from mobile device web browsers.
-*   🏷️ **Discount & Promo validation logic**: Tracking applied discounts and verifying that calculations like `subtotal - discount + tax = total` add up mathematically.
+To ensure a clean, professional repository, only push the source code, configurations, and core test samples. Do **NOT** push local databases, runtime uploads, or credentials.
+
+### Pushed Files (Include in Git)
+*   `app/` directory (FastAPI backend, storage, extraction handlers, schema models)
+*   `frontend/` directory (Gradio UI app & styles)
+*   `tests/` directory (Test suites and sample files)
+*   `run.py` (Unified launcher script)
+*   `requirements.txt` (Dependencies)
+*   `.env.example` (Template for environment variables)
+*   `.gitignore` (Repository ignore rules)
+*   `README.md` (Project documentation)
+
+### Ignored Files (Do NOT Push)
+*   `venv/` (Local virtual environment)
+*   `.env` (Contains your private Gemini API key)
+*   `receipts.db` (Local SQLite database)
+*   `uploads/` (Saved copies of uploaded receipts)
+*   `__pycache__/` and compilation folders (`.pyc`)
+*   `*.log` files (Temporary runtime logs)

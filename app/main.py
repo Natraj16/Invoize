@@ -95,15 +95,32 @@ async def _validate_upload(file: UploadFile) -> bytes:
       "the model couldn't extract any data"
     - Defence in depth: don't send arbitrary files to external APIs
     """
-    # 1. Check MIME type
-    if file.content_type not in settings.ALLOWED_MIME_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Unsupported file type: {file.content_type}. "
-                f"Allowed: {', '.join(sorted(settings.ALLOWED_MIME_TYPES))}"
-            ),
-        )
+    # 1. Check MIME type and fallback to extension check
+    content_type = file.content_type
+    ext = Path(file.filename or "").suffix.lower()
+    ext_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+        ".csv": "text/csv",
+        ".json": "application/json",
+        ".txt": "text/plain",
+    }
+    
+    if content_type not in settings.ALLOWED_MIME_TYPES or content_type == "application/octet-stream":
+        if ext in ext_map:
+            content_type = ext_map[ext]
+            file.content_type = content_type  # Update file object content-type
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported file type or extension: {content_type} ({ext or 'no extension'}). "
+                    f"Allowed extensions: {', '.join(sorted(ext_map.keys()))}"
+                ),
+            )
 
     # 2. Read and check size
     contents = await file.read()

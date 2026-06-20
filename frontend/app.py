@@ -93,6 +93,16 @@ def format_single_receipt_html(receipt: dict, filename: str = None) -> str:
     currency = receipt.get("currency") or "INR"
     pay_method = receipt.get("payment_method") or "—"
     
+    # Nicer date formatting (e.g. 20-Jun-2026)
+    formatted_date = date_val
+    if date_val and date_val != "—":
+        try:
+            from datetime import datetime
+            parsed_dt = datetime.strptime(date_val, "%Y-%m-%d")
+            formatted_date = parsed_dt.strftime("%d-%b-%Y")
+        except Exception:
+            pass
+            
     html = []
     html.append(f'<div class="receipt-card">')
     
@@ -102,15 +112,15 @@ def format_single_receipt_html(receipt: dict, filename: str = None) -> str:
         html.append(f'    <div class="receipt-card-subtitle" style="font-size: 11px; opacity: 0.6; font-family: monospace;">File: {filename}</div>')
     html.append(f'    <h2 class="receipt-card-title">{vendor}</h2>')
     if address:
-        html.append(f'    <div class="receipt-card-subtitle">{address}</div>')
+        html.append(f'    <div class="receipt-card-subtitle" style="font-style: italic; max-width: 80%; margin: 4px auto 0 auto;">{address}</div>')
     html.append(f'  </div>')
     
     # Metadata Grid
     html.append(f'  <div class="receipt-meta-grid">')
-    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Date</span><span class="receipt-meta-val">{date_val}</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Date</span><span class="receipt-meta-val">{formatted_date}</span></div>')
     html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Time</span><span class="receipt-meta-val">{time_val}</span></div>')
-    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Currency</span><span class="receipt-meta-val">{currency} ({sym})</span></div>')
-    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Payment</span><span class="receipt-meta-val">{pay_method}</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Currency</span><span class="receipt-meta-val">{currency.upper()} ({sym})</span></div>')
+    html.append(f'    <div class="receipt-meta-item"><span class="receipt-meta-label">Payment</span><span class="receipt-meta-val">{pay_method.upper()}</span></div>')
     html.append(f'  </div>')
     
     # Items Table
@@ -144,6 +154,15 @@ def format_single_receipt_html(receipt: dict, filename: str = None) -> str:
         html.append(f'        <td class="num-col">{sym}{t_price:.2f}</td>')
         html.append(f'      </tr>')
         
+    discount_val = receipt.get("discount") or 0.0
+    if discount_val > 0:
+        html.append(f'      <tr style="color: var(--color-emerald); font-weight: 500;">')
+        html.append(f'        <td>Discount Applied</td>')
+        html.append(f'        <td class="num-col">—</td>')
+        html.append(f'        <td class="num-col">—</td>')
+        html.append(f'        <td class="num-col">-{sym}{discount_val:.2f}</td>')
+        html.append(f'      </tr>')
+        
     html.append(f'    </tbody>')
     html.append(f'  </table>')
     
@@ -152,7 +171,6 @@ def format_single_receipt_html(receipt: dict, filename: str = None) -> str:
     if receipt.get("subtotal") is not None:
         html.append(f'    <div class="receipt-total-row"><span class="lbl">Subtotal</span><span class="val">{sym}{receipt["subtotal"]:.2f}</span></div>')
     
-    discount_val = receipt.get("discount") or 0.0
     if discount_val > 0:
         html.append(f'    <div class="receipt-total-row discount-row"><span class="lbl">Discount Applied</span><span class="val">-{sym}{discount_val:.2f}</span></div>')
     else:
@@ -202,6 +220,10 @@ async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.P
         progress(0, desc="Starting extraction pipeline...")
 
         for idx, file_item in enumerate(all_files):
+            if idx > 0:
+                progress((idx / len(all_files)), desc=f"Rate limit safety delay... waiting 1.5s")
+                time.sleep(1.5)
+
             # Resolve actual path and filename robustly
             actual_path = None
             filename = None
@@ -280,12 +302,19 @@ async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.P
 
                     sym = get_currency_symbol(receipt.get("currency"))
                     discount_amt = receipt.get("discount") or 0.0
+                    subtotal_val = receipt.get("subtotal")
+                    subtotal_str = f"{sym}{subtotal_val:.2f}" if subtotal_val is not None else "—"
+                    tax_val = receipt.get("tax")
+                    tax_str = f"{sym}{tax_val:.2f}" if tax_val is not None else "—"
+                    
                     results_summary.append({
                         "filename": filename,
                         "vendor": receipt.get("vendor_name", "Unknown"),
                         "date": receipt.get("date", "Unknown"),
-                        "total": f"{sym}{receipt.get('total', 0.0):.2f}",
+                        "subtotal": subtotal_str,
                         "discount": f"-{sym}{discount_amt:.2f}" if discount_amt > 0 else "—",
+                        "tax": tax_str,
+                        "total": f"{sym}{receipt.get('total', 0.0):.2f}",
                         "currency": receipt.get("currency", "INR"),
                         "status": "✓ Success",
                         "confidence": (data.get("validation", {}).get("overall_confidence") or "high").upper()
@@ -296,8 +325,10 @@ async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.P
                         "filename": filename,
                         "vendor": "—",
                         "date": "—",
-                        "total": "—",
+                        "subtotal": "—",
                         "discount": "—",
+                        "tax": "—",
+                        "total": "—",
                         "currency": "—",
                         "status": f"✗ Failed: {error_msg}",
                         "confidence": "LOW"
@@ -308,8 +339,10 @@ async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.P
                     "filename": filename,
                     "vendor": "—",
                     "date": "—",
-                    "total": "—",
+                    "subtotal": "—",
                     "discount": "—",
+                    "tax": "—",
+                    "total": "—",
                     "currency": "—",
                     "status": f"✗ Error: {type(e).__name__}",
                     "confidence": "LOW"
@@ -344,29 +377,19 @@ async def extract_receipt(files, camera_file, method="vision_llm", progress=gr.P
             editable_json = json.dumps(receipt, indent=2)
             validation_md = _format_validation(last_validation)
         else:
-            # Multi-file batch layout
+            # Multi-file batch layout (totals-only summary table)
             summary_lines = [
                 "## Batch Extraction Summary",
                 "",
                 f"Successfully processed **{len(successful_ids)}/{len(all_files)}** files.",
                 "",
-                "| File Name | Vendor | Date | Total | Discount | Currency | Status | Confidence |",
-                "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+                "| File Name | Vendor | Date | Subtotal | Discount | Tax | Total | Currency | Status | Confidence |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
             ]
             for res in results_summary:
                 summary_lines.append(
-                    f"| {res['filename']} | {res['vendor']} | {res['date']} | {res['total']} | {res['discount']} | {res['currency']} | {res['status']} | {res['confidence']} |"
+                    f"| {res['filename']} | {res['vendor']} | {res['date']} | {res['subtotal']} | {res['discount']} | {res['tax']} | {res['total']} | {res['currency']} | {res['status']} | {res['confidence']} |"
                 )
-
-            summary_lines.append("")
-            summary_lines.append("---")
-            summary_lines.append("## Detailed Invoice Breakdowns")
-            summary_lines.append("")
-
-            # Append each receipt's HTML card
-            for idx, receipt in enumerate(all_extracted_data):
-                fname = results_summary[idx]["filename"] if idx < len(results_summary) else None
-                summary_lines.append(format_single_receipt_html(receipt, fname))
 
             summary = "\n".join(summary_lines)
             status = f"Batch extraction complete in {elapsed:.1f}s. Processed {len(successful_ids)}/{len(all_files)} successfully."
@@ -946,9 +969,10 @@ body, html, .gradio-container, .main, .gradio-container > div {
 @media (max-width: 768px) {
     #main-container {
         flex-direction: column !important;
-        display: block !important;
+        display: flex !important;
+        flex-wrap: wrap !important;
     }
-    #main-container > div {
+    #main-container > div, #main-container .row, #main-container .form {
         flex-direction: column !important;
         display: flex !important;
         width: 100% !important;
@@ -957,7 +981,7 @@ body, html, .gradio-container, .main, .gradio-container > div {
         width: 100% !important;
         min-width: 100% !important;
         max-width: 100% !important;
-        flex: 1 1 100% !important;
+        flex: none !important;
         min-height: auto !important;
         height: auto !important;
         padding: 24px 16px !important;
@@ -1306,6 +1330,12 @@ body, html, .gradio-container, .main, .gradio-container > div {
     text-align: right !important;
 }
 
+table:not(.receipt-table) {
+    display: block !important;
+    overflow-x: auto !important;
+    width: 100% !important;
+}
+
 .receipt-totals-section {
     border-top: 1px dashed var(--color-steel) !important;
     padding-top: 16px !important;
@@ -1385,10 +1415,10 @@ with gr.Blocks(
                             interactive=False,
                             elem_classes=["preview-box"]
                         )
-                    with gr.TabItem("Camera Capture"):
+                    with gr.TabItem("Camera Capture (Click image and add bill)"):
                         # Webcam input
                         camera_input = gr.Image(
-                            label="Capture receipt with webcam",
+                            label="Click Image to Add Bill (Webcam)",
                             sources=["webcam"],
                             type="filepath",
                             elem_classes=["panel-card"]

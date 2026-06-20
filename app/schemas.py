@@ -155,5 +155,8 @@ def get_currency_symbol(currency_code: str) -> str:
         "CAD": "C$",
         "AUD": "A$",
     }
-    return symbols.get((currency_code or "").upper(), "₹" if (currency_code or "").upper() == "INR" else "$")
+    code = (currency_code or "").strip().upper()
+    if code in ("RS", "RUPEES", "INR", "₹"):
+        return "₹"
+    return symbols.get(code, "$")
 

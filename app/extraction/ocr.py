@@ -136,11 +136,13 @@ async def extract_via_ocr_pipeline(
         if not ocr_text.strip():
             raise ValueError("OCR extracted empty text. The image might be too blurry or corrupted.")
 
-        # 3. Call Gemini to parse and structure the OCR text
+        # 3. Call Gemini to parse and structure the OCR text using retry helper
         client = _get_client()
         prompt = OCR_CLEANUP_PROMPT.format(ocr_text=ocr_text)
 
-        response = client.models.generate_content(
+        from app.extraction.retry_helper import generate_content_with_retry
+        response = await generate_content_with_retry(
+            client=client,
             model=settings.GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(

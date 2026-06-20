@@ -39,7 +39,7 @@ Key instructions for tricky cases:
 - If line items don't have explicit quantities, assume quantity = 1
 - If you see multiple tax lines (e.g., "State Tax" + "City Tax"), SUM them into the single `tax` field
 - For dates: convert ANY format to YYYY-MM-DD (e.g., "06/15/24" → "2024-06-15", "15 Jun 2024" → "2024-06-15")
-- For currency: infer from symbols ($ → USD, € → EUR, £ → GBP, ₹ → INR, ¥ → JPY)
+- For currency: infer from symbols and text ($ → USD, € → EUR, £ → GBP, ₹ → INR, ¥ → JPY, Rs → INR, Rs. → INR, Rupees → INR). Defaults to INR if Rupees/Rs or Indian location is present.
 - If the receipt shows a discount line, include it as a line item with a NEGATIVE total_price
 - If handwriting is unclear, extract your best reading — the validation layer will flag low-confidence fields
 - The `total` field is the FINAL amount paid (after tax, after tips, after discounts)
@@ -146,10 +146,10 @@ async def extract_from_image(
         else:
             image_part = _load_image_bytes_as_part(image_source, mime_type)
 
-        # Call Gemini with structured output
-        # This is the core of the extraction — response_schema enforces
-        # that the output matches our Pydantic model EXACTLY.
-        response = client.models.generate_content(
+        # Call Gemini with structured output using retry helper
+        from app.extraction.retry_helper import generate_content_with_retry
+        response = await generate_content_with_retry(
+            client=client,
             model=settings.GEMINI_MODEL,
             contents=[
                 types.Content(
@@ -199,33 +199,36 @@ async def extract_from_text(
 ) -> ExtractionResponse:
     """
     Extract structured receipt data from text (CSV, JSON, plain text) using Gemini text generation.
-    Bypasses the LLM for JSON matching ReceiptData schema directly.
+    Bypasses the LLM for JSON/CSV matching supported structures directly.
     """
     start_time = time.time()
 
     try:
-        # Check if it's already matching ReceiptData schema directly to save tokens/time
-        if "json" in (mime_type or "").lower() or filename.endswith(".json"):
-            try:
-                import json
-                parsed_dict = json.loads(text_content)
-                receipt_data = ReceiptData.model_validate(parsed_dict)
-                elapsed = time.time() - start_time
-                return ExtractionResponse(
-                    success=True,
-                    filename=filename,
-                    extraction_method="direct_json",
-                    data=receipt_data,
-                    processing_time_seconds=round(elapsed, 2),
-                )
-            except Exception:
-                # Fallback to LLM if the JSON layout is in an arbitrary schema
-                pass
+        # Attempt deterministic offline parsing first (JSON/CSV) to save API quota and speed up processing
+        from app.extraction.text_parser import parse_text_deterministically
+        receipt_data = parse_text_deterministically(text_content, filename, mime_type)
+        if receipt_data:
+            elapsed = time.time() - start_time
+            ext_method = "direct_json" if ("json" in (mime_type or "").lower() or filename.endswith(".json")) else "direct_csv"
+            return ExtractionResponse(
+                success=True,
+                filename=filename,
+                extraction_method=ext_method,
+                data=receipt_data,
+                processing_time_seconds=round(elapsed, 2),
+            )
+    except Exception as e:
+        # If offline parsing fails, fall back to LLM processing
+        print(f"[INFO] Deterministic offline parsing failed: {e}. Falling back to Gemini.")
+        pass
 
+    try:
         client = _get_client()
 
-        # Call Gemini with structured output
-        response = client.models.generate_content(
+        # Call Gemini with structured output using retry helper
+        from app.extraction.retry_helper import generate_content_with_retry
+        response = await generate_content_with_retry(
+            client=client,
             model=settings.GEMINI_MODEL,
             contents=[
                 types.Content(
