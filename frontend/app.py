@@ -946,11 +946,40 @@ body, html, .gradio-container, .main, .gradio-container > div {
 @media (max-width: 768px) {
     #main-container {
         flex-direction: column !important;
+        display: block !important;
+    }
+    #main-container > div {
+        flex-direction: column !important;
+        display: flex !important;
+        width: 100% !important;
     }
     #left-panel, #right-panel {
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        flex: 1 1 100% !important;
         min-height: auto !important;
         height: auto !important;
-        padding: 32px 24px !important;
+        padding: 24px 16px !important;
+        border-right: none !important;
+        border-bottom: 1px solid var(--color-graphite) !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .receipt-card {
+        padding: 16px 12px !important;
+    }
+    .receipt-meta-grid {
+        grid-template-columns: 1fr !important;
+        gap: 8px !important;
+    }
+    .receipt-total-row {
+        max-width: 100% !important;
+    }
+    .receipt-table th, .receipt-table td {
+        padding: 8px 2px !important;
+        font-size: 11px !important;
     }
 }
 
