@@ -151,25 +151,3 @@ python run.py
 *   **Gradio UI**: [http://127.0.0.1:7860](http://127.0.0.1:7860) (Interactive Web Client)
 
 ---
-
-## 📦 What to Push to GitHub
-
-To ensure a clean, professional repository, only push the source code, configurations, and core test samples. Do **NOT** push local databases, runtime uploads, or credentials.
-
-### Pushed Files (Include in Git)
-*   `app/` directory (FastAPI backend, storage, extraction handlers, schema models)
-*   `frontend/` directory (Gradio UI app & styles)
-*   `tests/` directory (Test suites and sample files)
-*   `run.py` (Unified launcher script)
-*   `requirements.txt` (Dependencies)
-*   `.env.example` (Template for environment variables)
-*   `.gitignore` (Repository ignore rules)
-*   `README.md` (Project documentation)
-
-### Ignored Files (Do NOT Push)
-*   `venv/` (Local virtual environment)
-*   `.env` (Contains your private Gemini API key)
-*   `receipts.db` (Local SQLite database)
-*   `uploads/` (Saved copies of uploaded receipts)
-*   `__pycache__/` and compilation folders (`.pyc`)
-*   `*.log` files (Temporary runtime logs)
