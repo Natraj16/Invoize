@@ -3,7 +3,7 @@
 Invoize is a portfolio-ready document extraction engine that parses unstructured receipts and invoices (images/PDFs) into structured JSON database records. It validates extracted data through an independent, rule-based deterministic layer, stores records in SQLite, and provides export endpoints for CSV and styled Excel workbooks.
 
 Built with a clean separation of concerns, the system features a **FastAPI backend** microservice and an interactive **Gradio frontend UI**.
-
+ 
 ---
 
 ## 🏗️ Architecture Overview
